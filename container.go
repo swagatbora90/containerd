@@ -34,11 +34,13 @@ import (
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/protobuf"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
+	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/fifo"
 	"github.com/containerd/typeurl"
 	ver "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/selinux/go-selinux/label"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -103,6 +105,8 @@ func (c *container) ID() string {
 }
 
 func (c *container) Info(ctx context.Context, opts ...InfoOpts) (containers.Container, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Info")
+	defer tracing.StopSpan(span)
 	i := &InfoConfig{
 		// default to refreshing the container's local metadata
 		Refresh: true,
@@ -121,6 +125,8 @@ func (c *container) Info(ctx context.Context, opts ...InfoOpts) (containers.Cont
 }
 
 func (c *container) Extensions(ctx context.Context) (map[string]typeurl.Any, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Extensions")
+	defer tracing.StopSpan(span)
 	r, err := c.get(ctx)
 	if err != nil {
 		return nil, err
@@ -129,6 +135,8 @@ func (c *container) Extensions(ctx context.Context) (map[string]typeurl.Any, err
 }
 
 func (c *container) Labels(ctx context.Context) (map[string]string, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Labels")
+	defer tracing.StopSpan(span)
 	r, err := c.get(ctx)
 	if err != nil {
 		return nil, err
@@ -137,6 +145,9 @@ func (c *container) Labels(ctx context.Context) (map[string]string, error) {
 }
 
 func (c *container) SetLabels(ctx context.Context, labels map[string]string) (map[string]string, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.SetLabels",
+		tracing.SpanAttributes(attribute.String("container.id", c.id)))
+	defer tracing.StopSpan(span)
 	container := containers.Container{
 		ID:     c.id,
 		Labels: labels,
@@ -148,8 +159,11 @@ func (c *container) SetLabels(ctx context.Context, labels map[string]string) (ma
 	for k := range labels {
 		paths = append(paths, strings.Join([]string{"labels", k}, "."))
 	}
-
+	span.AddEvent("call container store to update container", tracing.SpanAttributes(
+		attribute.String("update.container.id", container.ID),
+	))
 	r, err := c.client.ContainerService().Update(ctx, container, paths...)
+	span.AddEvent("updated container in container store")
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +172,8 @@ func (c *container) SetLabels(ctx context.Context, labels map[string]string) (ma
 
 // Spec returns the current OCI specification for the container
 func (c *container) Spec(ctx context.Context) (*oci.Spec, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Spec")
+	defer tracing.StopSpan(span)
 	r, err := c.get(ctx)
 	if err != nil {
 		return nil, err
@@ -172,6 +188,8 @@ func (c *container) Spec(ctx context.Context) (*oci.Spec, error) {
 // Delete deletes an existing container
 // an error is returned if the container has running tasks
 func (c *container) Delete(ctx context.Context, opts ...DeleteOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "container.Delete")
+	defer tracing.StopSpan(span)
 	if _, err := c.loadTask(ctx, nil); err == nil {
 		return fmt.Errorf("cannot delete running task %v: %w", c.id, errdefs.ErrFailedPrecondition)
 	}
@@ -184,15 +202,21 @@ func (c *container) Delete(ctx context.Context, opts ...DeleteOpts) error {
 			return err
 		}
 	}
+	span.AddEvent("call container store to delete container")
+	defer span.AddEvent("container deleted")
 	return c.client.ContainerService().Delete(ctx, c.id)
 }
 
 func (c *container) Task(ctx context.Context, attach cio.Attach) (Task, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Task")
+	defer tracing.StopSpan(span)
 	return c.loadTask(ctx, attach)
 }
 
 // Image returns the image that the container is based on
 func (c *container) Image(ctx context.Context) (Image, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Image")
+	defer tracing.StopSpan(span)
 	r, err := c.get(ctx)
 	if err != nil {
 		return nil, err
@@ -200,14 +224,19 @@ func (c *container) Image(ctx context.Context) (Image, error) {
 	if r.Image == "" {
 		return nil, fmt.Errorf("container not created from an image: %w", errdefs.ErrNotFound)
 	}
+	span.AddEvent("get image from image store",
+		tracing.SpanAttributes(attribute.String("image.ref", r.Image)))
 	i, err := c.client.ImageService().Get(ctx, r.Image)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get image %s for container: %w", r.Image, err)
 	}
+	span.AddEvent("image found")
 	return NewImage(c.client, i), nil
 }
 
 func (c *container) NewTask(ctx context.Context, ioCreate cio.Creator, opts ...NewTaskOpts) (_ Task, err error) {
+	ctx, span := tracing.StartSpan(ctx, "container.NewTask")
+	defer tracing.StopSpan(span)
 	i, err := ioCreate(c.id)
 	if err != nil {
 		return nil, err
@@ -295,16 +324,27 @@ func (c *container) NewTask(ctx context.Context, ioCreate cio.Creator, opts ...N
 	if info.Checkpoint != nil {
 		request.Checkpoint = info.Checkpoint
 	}
+	span.AddEvent("call task service to create task", tracing.SpanAttributes(
+		attribute.String("task.container.id", request.ContainerID),
+		attribute.String("task.request.options", request.Options.String()),
+		attribute.String("task.runtime.name", info.runtime),
+	))
 	response, err := c.client.TaskService().Create(ctx, request)
 	if err != nil {
 		return nil, errdefs.FromGRPC(err)
 	}
+	span.AddEvent("task created", tracing.SpanAttributes(
+		attribute.String("task.container.id", response.ContainerID),
+		attribute.Int("task.process.id", int(response.Pid)),
+	))
 	t.pid = response.Pid
 	return t, nil
 }
 
 func (c *container) Update(ctx context.Context, opts ...UpdateContainerOpts) error {
 	// fetch the current container config before updating it
+	ctx, span := tracing.StartSpan(ctx, "container.Update")
+	defer tracing.StopSpan(span)
 	r, err := c.get(ctx)
 	if err != nil {
 		return err
@@ -314,13 +354,18 @@ func (c *container) Update(ctx context.Context, opts ...UpdateContainerOpts) err
 			return err
 		}
 	}
+	span.AddEvent("update container in container store")
 	if _, err := c.client.ContainerService().Update(ctx, r); err != nil {
 		return errdefs.FromGRPC(err)
 	}
+	span.AddEvent("container updated")
 	return nil
 }
 
 func (c *container) Checkpoint(ctx context.Context, ref string, opts ...CheckpointOpts) (Image, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Checkpoint")
+	defer tracing.StopSpan(span)
+	span.End()
 	index := &ocispec.Index{
 		Versioned: ver.Versioned{
 			SchemaVersion: 2,
@@ -385,6 +430,10 @@ func (c *container) Checkpoint(ctx context.Context, ref string, opts ...Checkpoi
 }
 
 func (c *container) loadTask(ctx context.Context, ioAttach cio.Attach) (Task, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.loadTask",
+		tracing.SpanAttributes(attribute.String("container.id", c.id)))
+	defer tracing.StopSpan(span)
+	span.AddEvent("load task from task service")
 	response, err := c.client.TaskService().Get(ctx, &tasks.GetRequest{
 		ContainerID: c.id,
 	})
@@ -403,6 +452,11 @@ func (c *container) loadTask(ctx context.Context, ioAttach cio.Attach) (Task, er
 			return nil, err
 		}
 	}
+	span.AddEvent("load task success",
+		tracing.SpanAttributes(
+			attribute.String("task.process.id", response.Process.ID),
+			attribute.String("task.process.status", response.Process.Status.String())))
+
 	t := &task{
 		client: c.client,
 		io:     i,
@@ -414,6 +468,9 @@ func (c *container) loadTask(ctx context.Context, ioAttach cio.Attach) (Task, er
 }
 
 func (c *container) get(ctx context.Context) (containers.Container, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.getContainerFromStore",
+		tracing.SpanAttributes(attribute.String("container.id", c.id)))
+	defer tracing.StopSpan(span)
 	return c.client.ContainerService().Get(ctx, c.id)
 }
 

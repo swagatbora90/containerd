@@ -24,8 +24,10 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/go-cni"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.opentelemetry.io/otel/attribute"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
@@ -33,11 +35,13 @@ import (
 
 // PodSandboxStatus returns the status of the PodSandbox.
 func (c *criService) PodSandboxStatus(ctx context.Context, r *runtime.PodSandboxStatusRequest) (*runtime.PodSandboxStatusResponse, error) {
+	span := tracing.CurrentSpan(ctx)
+	span.AddEvent("get sandbox from sandbox store")
 	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
 	if err != nil {
 		return nil, fmt.Errorf("an error occurred when try to find sandbox: %w", err)
 	}
-
+	span.AddEvent("found sandbox in sandbox store")
 	ip, additionalIPs, err := c.getIPs(sandbox)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox ip: %w", err)
@@ -60,6 +64,12 @@ func (c *criService) PodSandboxStatus(ctx context.Context, r *runtime.PodSandbox
 	if err != nil {
 		return nil, fmt.Errorf("failed to get verbose sandbox container info: %w", err)
 	}
+
+	span.SetAttributes(
+		attribute.String("sandbox.name", sandbox.Name),
+		attribute.String("sandbox.state", status.State.String()),
+		attribute.Int64("sandbox.createdAt", status.GetCreatedAt()),
+	)
 
 	return &runtime.PodSandboxStatusResponse{
 		Status: status,

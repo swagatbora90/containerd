@@ -20,13 +20,16 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
+	"github.com/containerd/containerd/tracing"
 )
 
 // ListPodSandbox returns a list of Sandbox.
 func (c *criService) ListPodSandbox(ctx context.Context, r *runtime.ListPodSandboxRequest) (*runtime.ListPodSandboxResponse, error) {
+	span := tracing.CurrentSpan(ctx)
 	start := time.Now()
 	// List all sandboxes from store.
 	sandboxesInStore := c.sandboxStore.List()
@@ -39,7 +42,10 @@ func (c *criService) ListPodSandbox(ctx context.Context, r *runtime.ListPodSandb
 	}
 
 	sandboxes = c.filterCRISandboxes(sandboxes, r.GetFilter())
-
+	span.SetAttributes(
+		attribute.Int("list.sandbox.count", len(sandboxes)),
+		attribute.String("list.sandbox.response.duration", time.Since(start).String()),
+	)
 	sandboxListTimer.UpdateSince(start)
 	return &runtime.ListPodSandboxResponse{Items: sandboxes}, nil
 }

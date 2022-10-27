@@ -27,6 +27,8 @@ import (
 	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/protobuf"
+	"github.com/containerd/containerd/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Process represents a system process
@@ -118,6 +120,11 @@ func (p *process) Pid() uint32 {
 
 // Start starts the exec process
 func (p *process) Start(ctx context.Context) error {
+	ctx, span := tracing.StartSpan(ctx, "process.Start",
+		tracing.SpanAttributes(
+			attribute.String("process.id", p.ID()),
+			attribute.String("process.task.id", p.task.ID())))
+	defer tracing.StopSpan(span)
 	r, err := p.task.client.TaskService().Start(ctx, &tasks.StartRequest{
 		ContainerID: p.task.id,
 		ExecID:      p.id,
@@ -130,11 +137,18 @@ func (p *process) Start(ctx context.Context) error {
 		}
 		return errdefs.FromGRPC(err)
 	}
+	span.SetAttributes(attribute.Int("process.pid", int(r.Pid)))
 	p.pid = r.Pid
 	return nil
 }
 
 func (p *process) Kill(ctx context.Context, s syscall.Signal, opts ...KillOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "process.Kill",
+		tracing.SpanAttributes(
+			attribute.String("process.id", p.ID()),
+			attribute.Int("process.pid", int(p.Pid())),
+			attribute.String("process.task.id", p.task.ID())))
+	defer tracing.StopSpan(span)
 	var i KillInfo
 	for _, o := range opts {
 		if err := o(ctx, &i); err != nil {
@@ -154,6 +168,11 @@ func (p *process) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 	c := make(chan ExitStatus, 1)
 	go func() {
 		defer close(c)
+		ctx, span := tracing.StartSpan(ctx, "process.Wait",
+			tracing.SpanAttributes(
+				attribute.String("process.id", p.ID()),
+				attribute.String("process.task.id", p.task.ID())))
+		defer tracing.StopSpan(span)
 		r, err := p.task.client.TaskService().Wait(ctx, &tasks.WaitRequest{
 			ContainerID: p.task.id,
 			ExecID:      p.id,
@@ -174,6 +193,9 @@ func (p *process) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 }
 
 func (p *process) CloseIO(ctx context.Context, opts ...IOCloserOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "process.CloseIO",
+		tracing.SpanAttributes(attribute.String("process.id", p.ID())))
+	defer tracing.StopSpan(span)
 	r := &tasks.CloseIORequest{
 		ContainerID: p.task.id,
 		ExecID:      p.id,
@@ -192,6 +214,9 @@ func (p *process) IO() cio.IO {
 }
 
 func (p *process) Resize(ctx context.Context, w, h uint32) error {
+	ctx, span := tracing.StartSpan(ctx, "process.Resize",
+		tracing.SpanAttributes(attribute.String("process.id", p.ID())))
+	defer tracing.StopSpan(span)
 	_, err := p.task.client.TaskService().ResizePty(ctx, &tasks.ResizePtyRequest{
 		ContainerID: p.task.id,
 		Width:       w,
@@ -202,6 +227,9 @@ func (p *process) Resize(ctx context.Context, w, h uint32) error {
 }
 
 func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStatus, error) {
+	ctx, span := tracing.StartSpan(ctx, "process.Delete",
+		tracing.SpanAttributes(attribute.String("process.id", p.ID())))
+	defer tracing.StopSpan(span)
 	for _, o := range opts {
 		if err := o(ctx, p); err != nil {
 			return nil, err
@@ -215,6 +243,7 @@ func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitS
 	case Running, Paused, Pausing:
 		return nil, fmt.Errorf("current process state: %s, process must be stopped before deletion: %w", status.Status, errdefs.ErrFailedPrecondition)
 	}
+	span.AddEvent("call task service to delete process")
 	r, err := p.task.client.TaskService().DeleteProcess(ctx, &tasks.DeleteProcessRequest{
 		ContainerID: p.task.id,
 		ExecID:      p.id,
@@ -222,6 +251,7 @@ func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitS
 	if err != nil {
 		return nil, errdefs.FromGRPC(err)
 	}
+	span.AddEvent("process deleted")
 	if p.io != nil {
 		p.io.Cancel()
 		p.io.Wait()
@@ -231,6 +261,9 @@ func (p *process) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitS
 }
 
 func (p *process) Status(ctx context.Context) (Status, error) {
+	ctx, span := tracing.StartSpan(ctx, "process.Status",
+		tracing.SpanAttributes(attribute.String("process.id", p.ID())))
+	defer tracing.StopSpan(span)
 	r, err := p.task.client.TaskService().Get(ctx, &tasks.GetRequest{
 		ContainerID: p.task.id,
 		ExecID:      p.id,
@@ -238,8 +271,14 @@ func (p *process) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, errdefs.FromGRPC(err)
 	}
+	status := ProcessStatus(strings.ToLower(r.Process.Status.String()))
+	exitStatus := r.Process.ExitStatus
+	span.SetAttributes(
+		attribute.String("process.status", string(status)),
+		attribute.Int("process.exit.status", int(exitStatus)))
+
 	return Status{
-		Status:     ProcessStatus(strings.ToLower(r.Process.Status.String())),
-		ExitStatus: r.Process.ExitStatus,
+		Status:     status,
+		ExitStatus: exitStatus,
 	}, nil
 }

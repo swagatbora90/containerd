@@ -43,11 +43,13 @@ import (
 	"github.com/containerd/containerd/rootfs"
 	"github.com/containerd/containerd/runtime/linux/runctypes"
 	"github.com/containerd/containerd/runtime/v2/runc/options"
+	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/typeurl"
 	digest "github.com/opencontainers/go-digest"
 	is "github.com/opencontainers/image-spec/specs-go"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // UnknownExitStatus is returned when containerd is unable to
@@ -208,6 +210,9 @@ func (t *task) Pid() uint32 {
 }
 
 func (t *task) Start(ctx context.Context) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Start",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	r, err := t.client.TaskService().Start(ctx, &tasks.StartRequest{
 		ContainerID: t.id,
 	})
@@ -218,17 +223,26 @@ func (t *task) Start(ctx context.Context) error {
 		}
 		return errdefs.FromGRPC(err)
 	}
+	span.SetAttributes(attribute.Int("task.process.pid", int(r.Pid)))
 	t.pid = r.Pid
 	return nil
 }
 
 func (t *task) Kill(ctx context.Context, s syscall.Signal, opts ...KillOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Kill",
+		tracing.SpanAttributes(
+			attribute.String("task.id", t.ID()),
+			attribute.Int("task.pid", int(t.Pid()))))
+	defer tracing.StopSpan(span)
 	var i KillInfo
 	for _, o := range opts {
 		if err := o(ctx, &i); err != nil {
 			return err
 		}
 	}
+	span.SetAttributes(
+		attribute.String("task.process.id", i.ExecID),
+		attribute.Bool("task.process.killall", i.All))
 	_, err := t.client.TaskService().Kill(ctx, &tasks.KillRequest{
 		Signal:      uint32(s),
 		ContainerID: t.id,
@@ -242,6 +256,9 @@ func (t *task) Kill(ctx context.Context, s syscall.Signal, opts ...KillOpts) err
 }
 
 func (t *task) Pause(ctx context.Context) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Pause",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	_, err := t.client.TaskService().Pause(ctx, &tasks.PauseTaskRequest{
 		ContainerID: t.id,
 	})
@@ -249,6 +266,9 @@ func (t *task) Pause(ctx context.Context) error {
 }
 
 func (t *task) Resume(ctx context.Context) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Resume",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	_, err := t.client.TaskService().Resume(ctx, &tasks.ResumeTaskRequest{
 		ContainerID: t.id,
 	})
@@ -256,16 +276,27 @@ func (t *task) Resume(ctx context.Context) error {
 }
 
 func (t *task) Status(ctx context.Context) (Status, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Status",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	r, err := t.client.TaskService().Get(ctx, &tasks.GetRequest{
 		ContainerID: t.id,
 	})
 	if err != nil {
 		return Status{}, errdefs.FromGRPC(err)
 	}
+	status := ProcessStatus(strings.ToLower(r.Process.Status.String()))
+	exitStatus := r.Process.ExitStatus
+	exitTime := protobuf.FromTimestamp(r.Process.ExitedAt)
+
+	span.SetAttributes(attribute.String("task.status", string(status)),
+		attribute.Int("task.exit.status", int(exitStatus)),
+		attribute.String("task.exit.time", exitTime.String()))
+
 	return Status{
-		Status:     ProcessStatus(strings.ToLower(r.Process.Status.String())),
-		ExitStatus: r.Process.ExitStatus,
-		ExitTime:   protobuf.FromTimestamp(r.Process.ExitedAt),
+		Status:     status,
+		ExitStatus: exitStatus,
+		ExitTime:   exitTime,
 	}, nil
 }
 
@@ -273,6 +304,9 @@ func (t *task) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 	c := make(chan ExitStatus, 1)
 	go func() {
 		defer close(c)
+		ctx, span := tracing.StartSpan(ctx, "task.Wait",
+			tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+		defer tracing.StopSpan(span)
 		r, err := t.client.TaskService().Wait(ctx, &tasks.WaitRequest{
 			ContainerID: t.id,
 		})
@@ -295,6 +329,9 @@ func (t *task) Wait(ctx context.Context) (<-chan ExitStatus, error) {
 // it returns the exit status of the task and any errors that were encountered
 // during cleanup
 func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStatus, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Delete",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	for _, o := range opts {
 		if err := o(ctx, t); err != nil {
 			return nil, err
@@ -304,6 +341,7 @@ func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStat
 	if err != nil && errdefs.IsNotFound(err) {
 		return nil, err
 	}
+
 	switch status.Status {
 	case Stopped, Unknown, "":
 	case Created:
@@ -320,12 +358,14 @@ func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStat
 		t.io.Cancel()
 		t.io.Wait()
 	}
+	span.AddEvent("call task service to delete task")
 	r, err := t.client.TaskService().Delete(ctx, &tasks.DeleteTaskRequest{
 		ContainerID: t.id,
 	})
 	if err != nil {
 		return nil, errdefs.FromGRPC(err)
 	}
+	span.AddEvent("task deleted")
 	// Only cleanup the IO after a successful Delete
 	if t.io != nil {
 		t.io.Close()
@@ -334,9 +374,13 @@ func (t *task) Delete(ctx context.Context, opts ...ProcessDeleteOpts) (*ExitStat
 }
 
 func (t *task) Exec(ctx context.Context, id string, spec *specs.Process, ioCreate cio.Creator) (_ Process, err error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Exec",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	if id == "" {
 		return nil, fmt.Errorf("exec id must not be empty: %w", errdefs.ErrInvalidArgument)
 	}
+	span.SetAttributes(attribute.String("task.process.id", id))
 	i, err := ioCreate(id)
 	if err != nil {
 		return nil, err
@@ -361,6 +405,7 @@ func (t *task) Exec(ctx context.Context, id string, spec *specs.Process, ioCreat
 		Stderr:      cfg.Stderr,
 		Spec:        any,
 	}
+	span.AddEvent("call task service to exec request")
 	if _, err := t.client.TaskService().Exec(ctx, request); err != nil {
 		i.Cancel()
 		i.Wait()
@@ -375,6 +420,9 @@ func (t *task) Exec(ctx context.Context, id string, spec *specs.Process, ioCreat
 }
 
 func (t *task) Pids(ctx context.Context) ([]ProcessInfo, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Pids",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	response, err := t.client.TaskService().ListPids(ctx, &tasks.ListPidsRequest{
 		ContainerID: t.id,
 	})
@@ -388,10 +436,14 @@ func (t *task) Pids(ctx context.Context) ([]ProcessInfo, error) {
 			Info: p.Info,
 		})
 	}
+	span.SetAttributes(attribute.Int("task.process.count", len(processList)))
 	return processList, nil
 }
 
 func (t *task) CloseIO(ctx context.Context, opts ...IOCloserOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "task.CloseIO",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	r := &tasks.CloseIORequest{
 		ContainerID: t.id,
 	}
@@ -400,6 +452,7 @@ func (t *task) CloseIO(ctx context.Context, opts ...IOCloserOpts) error {
 		o(&i)
 	}
 	r.Stdin = i.Stdin
+
 	_, err := t.client.TaskService().CloseIO(ctx, r)
 	return errdefs.FromGRPC(err)
 }
@@ -409,6 +462,9 @@ func (t *task) IO() cio.IO {
 }
 
 func (t *task) Resize(ctx context.Context, w, h uint32) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Resize",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	_, err := t.client.TaskService().ResizePty(ctx, &tasks.ResizePtyRequest{
 		ContainerID: t.id,
 		Width:       w,
@@ -420,6 +476,9 @@ func (t *task) Resize(ctx context.Context, w, h uint32) error {
 // NOTE: Checkpoint supports to dump task information to a directory, in this way, an empty
 // OCI Index will be returned.
 func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Image, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Checkpoint",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	ctx, done, err := t.client.WithLease(ctx)
 	if err != nil {
 		return nil, err
@@ -504,9 +563,12 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointTaskOpts) (Imag
 			"containerd.io/checkpoint": "true",
 		},
 	}
+	span.AddEvent("call image service to create image",
+		tracing.SpanAttributes(attribute.String("task.image.ref", im.Name)))
 	if im, err = t.client.ImageService().Create(ctx, im); err != nil {
 		return nil, err
 	}
+	span.AddEvent("task image created")
 	return NewImage(t.client, im), nil
 }
 
@@ -522,6 +584,9 @@ type UpdateTaskInfo struct {
 type UpdateTaskOpts func(context.Context, *Client, *UpdateTaskInfo) error
 
 func (t *task) Update(ctx context.Context, opts ...UpdateTaskOpts) error {
+	ctx, span := tracing.StartSpan(ctx, "task.Update",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	request := &tasks.UpdateTaskRequest{
 		ContainerID: t.id,
 	}
@@ -546,6 +611,9 @@ func (t *task) Update(ctx context.Context, opts ...UpdateTaskOpts) error {
 }
 
 func (t *task) LoadProcess(ctx context.Context, id string, ioAttach cio.Attach) (Process, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.LoadProcess",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	if id == t.id && ioAttach == nil {
 		return t, nil
 	}
@@ -566,6 +634,7 @@ func (t *task) LoadProcess(ctx context.Context, id string, ioAttach cio.Attach) 
 			return nil, err
 		}
 	}
+	span.SetAttributes(attribute.String("load.process.id", id))
 	return &process{
 		id:   id,
 		task: t,
@@ -574,6 +643,9 @@ func (t *task) LoadProcess(ctx context.Context, id string, ioAttach cio.Attach) 
 }
 
 func (t *task) Metrics(ctx context.Context) (*types.Metric, error) {
+	ctx, span := tracing.StartSpan(ctx, "task.Metrics",
+		tracing.SpanAttributes(attribute.String("task.id", t.ID())))
+	defer tracing.StopSpan(span)
 	response, err := t.client.TaskService().Metrics(ctx, &tasks.MetricsRequest{
 		Filters: []string{
 			"id==" + t.id,

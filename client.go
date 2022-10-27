@@ -60,9 +60,11 @@ import (
 	"github.com/containerd/containerd/services/introspection"
 	"github.com/containerd/containerd/snapshots"
 	snproxy "github.com/containerd/containerd/snapshots/proxy"
+	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/typeurl"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -271,12 +273,13 @@ func (c *Client) Containers(ctx context.Context, filters ...string) ([]Container
 // NewContainer will create a new container with the provided id.
 // The id must be unique within the namespace.
 func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContainerOpts) (Container, error) {
+	ctx, span := tracing.StartSpan(ctx, "client.NewContainer")
+	defer tracing.StopSpan(span)
 	ctx, done, err := c.WithLease(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer done(ctx)
-
 	container := containers.Container{
 		ID: id,
 		Runtime: containers.RuntimeInfo{
@@ -288,19 +291,43 @@ func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContain
 			return nil, err
 		}
 	}
+	span.AddEvent("create container in container store",
+		tracing.SpanAttributes(
+			attribute.String("container.id", container.ID),
+			attribute.String("container.runtime.name", container.Runtime.Name),
+			attribute.String("container.image.name", container.Image),
+			attribute.String("container.snapshotter.name", container.Snapshotter)))
 	r, err := c.ContainerService().Create(ctx, container)
 	if err != nil {
 		return nil, err
 	}
+	span.AddEvent("container created",
+		tracing.SpanAttributes(
+			attribute.String("container.createdAt", r.CreatedAt.Format(time.RFC3339)),
+		),
+	)
 	return containerFromRecord(c, r), nil
 }
 
 // LoadContainer loads an existing container from metadata
 func (c *Client) LoadContainer(ctx context.Context, id string) (Container, error) {
+	ctx, span := tracing.StartSpan(ctx, "client.LoadContainer")
+	defer tracing.StopSpan(span)
+	span.AddEvent("load container from container store",
+		tracing.SpanAttributes(attribute.String("container.id", id)))
 	r, err := c.ContainerService().Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	span.AddEvent("container loaded",
+		tracing.SpanAttributes(
+			attribute.String("container.runtime.name", r.Runtime.Name),
+			attribute.String("container.image.name", r.Image),
+			attribute.String("container.createdAt", r.CreatedAt.Format(time.RFC3339)),
+			attribute.String("container.updatedAt", r.UpdatedAt.Format(time.RFC3339)),
+			attribute.String("container.snapshotter.name", r.Snapshotter),
+			attribute.String("sandbox.id", r.SandboxID)),
+	)
 	return containerFromRecord(c, r), nil
 }
 

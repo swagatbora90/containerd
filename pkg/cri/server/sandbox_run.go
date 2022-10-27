@@ -34,6 +34,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	selinux "github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/containerd"
@@ -49,6 +50,7 @@ import (
 	ctrdutil "github.com/containerd/containerd/pkg/cri/util"
 	"github.com/containerd/containerd/pkg/netns"
 	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/containerd/tracing"
 )
 
 func init() {
@@ -59,6 +61,7 @@ func init() {
 // RunPodSandbox creates and starts a pod-level sandbox. Runtimes should ensure
 // the sandbox is in ready state.
 func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandboxRequest) (_ *runtime.RunPodSandboxResponse, retErr error) {
+	span := tracing.CurrentSpan(ctx)
 	config := r.GetConfig()
 	log.G(ctx).Debugf("Sandbox config %+v", config)
 
@@ -69,6 +72,10 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, errors.New("sandbox config must include metadata")
 	}
 	name := makeSandboxName(metadata)
+	span.SetAttributes(
+		attribute.String("pod.sandbox.id", id),
+		attribute.String("pod.sandbox.name", name),
+	)
 	log.G(ctx).WithField("podsandboxid", id).Debugf("generated id for sandbox name %q", name)
 
 	// cleanupErr records the last error returned by the critical cleanup operations in deferred functions,
@@ -117,9 +124,11 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
 	}
+
 	log.G(ctx).WithField("podsandboxid", id).Debugf("use OCI runtime %+v", ociRuntime)
 
 	runtimeStart := time.Now()
+	span.AddEvent("Start sandbox container")
 	// Create sandbox container.
 	// NOTE: sandboxContainerSpec SHOULD NOT have side
 	// effect, e.g. accessing/creating files, so that we can test
@@ -173,7 +182,6 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	if err != nil {
 		return nil, fmt.Errorf("failed to create containerd container: %w", err)
 	}
-
 	// Add container into sandbox store in INIT state.
 	sandbox.Container = container
 
@@ -261,6 +269,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}
 
 	if podNetwork {
+		span.AddEvent("setup pod network")
 		netStart := time.Now()
 
 		// If it is not in host network namespace then create a namespace and set the sandbox
@@ -326,6 +335,9 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		}
 
 		sandboxCreateNetworkTimer.UpdateSince(netStart)
+		span.AddEvent("finished pod network setup",
+			tracing.SpanAttributes(attribute.String("pod.network.setup.duration", time.Since(netStart).String())),
+		)
 	}
 
 	// Create sandbox task in containerd.
@@ -386,6 +398,12 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}); err != nil {
 		return nil, fmt.Errorf("failed to update sandbox status: %w", err)
 	}
+	span.AddEvent("Successfully started sandbox container",
+		tracing.SpanAttributes(
+			attribute.Int("sandbox.status.pid", int(sandbox.Status.Get().Pid)),
+			attribute.String("sandbox.status.createdAt", sandbox.Status.Get().CreatedAt.Format(time.RFC3339)),
+			attribute.String("sandbox.status.state", sandbox.Status.Get().State.String()),
+		))
 
 	if err := c.sandboxStore.Add(sandbox); err != nil {
 		return nil, fmt.Errorf("failed to add sandbox %+v into store: %w", sandbox, err)

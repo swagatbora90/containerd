@@ -23,6 +23,7 @@ import (
 
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/tracing"
 
 	"github.com/sirupsen/logrus"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -31,6 +32,8 @@ import (
 // RemovePodSandbox removes the sandbox. If there are running containers in the
 // sandbox, they should be forcibly removed.
 func (c *criService) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodSandboxRequest) (*runtime.RemovePodSandboxResponse, error) {
+	span := tracing.CurrentSpan(ctx)
+	span.AddEvent("call sandbox store to get sandbox")
 	start := time.Now()
 	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
 	if err != nil {
@@ -43,6 +46,7 @@ func (c *criService) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodS
 			r.GetPodSandboxId())
 		return &runtime.RemovePodSandboxResponse{}, nil
 	}
+	span.AddEvent("found sandbox in sandbox store")
 	// Use the full sandbox id.
 	id := sandbox.ID
 

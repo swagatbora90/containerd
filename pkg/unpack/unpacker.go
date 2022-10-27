@@ -164,7 +164,7 @@ func (u *Unpacker) Unpack(h images.Handler) images.Handler {
 	)
 	return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		ctx, span := tracing.StartSpan(ctx, "pkg.unpack.unpacker.UnpackHandler")
-		defer span.End()
+		defer tracing.StopSpan(span)
 		span.SetAttributes(
 			attribute.String("descriptor.media.type", desc.MediaType),
 			attribute.String("descriptor.digest", desc.Digest.String()))

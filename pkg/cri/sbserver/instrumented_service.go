@@ -23,6 +23,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/tracing"
+	"go.opentelemetry.io/otel/attribute"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 	runtime_alpha "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
@@ -73,6 +74,8 @@ func (in *instrumentedService) RunPodSandbox(ctx context.Context, r *runtime.Run
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("RunPodSandbox"))
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("RunPodSandbox for %+v", r.GetConfig().GetMetadata())
 	defer func() {
 		if err != nil {
@@ -80,6 +83,7 @@ func (in *instrumentedService) RunPodSandbox(ctx context.Context, r *runtime.Run
 		} else {
 			log.G(ctx).Infof("RunPodSandbox for %+v returns sandbox id %q", r.GetConfig().GetMetadata(), res.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	res, err = in.c.RunPodSandbox(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
@@ -89,6 +93,8 @@ func (in *instrumentedAlphaService) RunPodSandbox(ctx context.Context, r *runtim
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("RunPodSandbox"))
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("RunPodSandbox for %+v", r.GetConfig().GetMetadata())
 	defer func() {
 		if err != nil {
@@ -96,6 +102,7 @@ func (in *instrumentedAlphaService) RunPodSandbox(ctx context.Context, r *runtim
 		} else {
 			log.G(ctx).Infof("RunPodSandbox for %+v returns sandbox id %q", r.GetConfig().GetMetadata(), res.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	// converts request and response for earlier CRI version to call and get response from the current version
 	var v1r runtime.RunPodSandboxRequest
@@ -126,6 +133,8 @@ func (in *instrumentedService) ListPodSandbox(ctx context.Context, r *runtime.Li
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("ListPodSandbox"))
+	defer tracing.StopSpan(span)
 	log.G(ctx).Tracef("ListPodSandbox with filter %+v", r.GetFilter())
 	defer func() {
 		if err != nil {
@@ -133,6 +142,7 @@ func (in *instrumentedService) ListPodSandbox(ctx context.Context, r *runtime.Li
 		} else {
 			log.G(ctx).Tracef("ListPodSandbox returns pod sandboxes %+v", res.GetItems())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	res, err = in.c.ListPodSandbox(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
@@ -142,6 +152,8 @@ func (in *instrumentedAlphaService) ListPodSandbox(ctx context.Context, r *runti
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("ListPodSandbox"))
+	defer tracing.StopSpan(span)
 	log.G(ctx).Tracef("ListPodSandbox with filter %+v", r.GetFilter())
 	defer func() {
 		if err != nil {
@@ -149,6 +161,7 @@ func (in *instrumentedAlphaService) ListPodSandbox(ctx context.Context, r *runti
 		} else {
 			log.G(ctx).Tracef("ListPodSandbox returns pod sandboxes %+v", res.GetItems())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	// converts request and response for earlier CRI version to call and get response from the current version
 	var v1r runtime.ListPodSandboxRequest
@@ -179,6 +192,10 @@ func (in *instrumentedService) PodSandboxStatus(ctx context.Context, r *runtime.
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("PodSandboxStatus"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Tracef("PodSandboxStatus for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -186,6 +203,7 @@ func (in *instrumentedService) PodSandboxStatus(ctx context.Context, r *runtime.
 		} else {
 			log.G(ctx).Tracef("PodSandboxStatus for %q returns status %+v", r.GetPodSandboxId(), res.GetStatus())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	res, err = in.c.PodSandboxStatus(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
@@ -195,6 +213,10 @@ func (in *instrumentedAlphaService) PodSandboxStatus(ctx context.Context, r *run
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("PodSandboxStatus"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Tracef("PodSandboxStatus for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -202,6 +224,7 @@ func (in *instrumentedAlphaService) PodSandboxStatus(ctx context.Context, r *run
 		} else {
 			log.G(ctx).Tracef("PodSandboxStatus for %q returns status %+v", r.GetPodSandboxId(), res.GetStatus())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	// converts request and response for earlier CRI version to call and get response from the current version
 	var v1r runtime.PodSandboxStatusRequest
@@ -232,6 +255,10 @@ func (in *instrumentedService) StopPodSandbox(ctx context.Context, r *runtime.St
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("StopPodSandbox"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("StopPodSandbox for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -239,6 +266,7 @@ func (in *instrumentedService) StopPodSandbox(ctx context.Context, r *runtime.St
 		} else {
 			log.G(ctx).Infof("StopPodSandbox for %q returns successfully", r.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	res, err := in.c.StopPodSandbox(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
@@ -248,6 +276,10 @@ func (in *instrumentedAlphaService) StopPodSandbox(ctx context.Context, r *runti
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("StopPodSandbox"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("StopPodSandbox for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -255,6 +287,7 @@ func (in *instrumentedAlphaService) StopPodSandbox(ctx context.Context, r *runti
 		} else {
 			log.G(ctx).Infof("StopPodSandbox for %q returns successfully", r.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	// converts request and response for earlier CRI version to call and get response from the current version
 	var v1r runtime.StopPodSandboxRequest
@@ -285,6 +318,10 @@ func (in *instrumentedService) RemovePodSandbox(ctx context.Context, r *runtime.
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("StopPodSandbox"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("RemovePodSandbox for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -292,6 +329,7 @@ func (in *instrumentedService) RemovePodSandbox(ctx context.Context, r *runtime.
 		} else {
 			log.G(ctx).Infof("RemovePodSandbox %q returns successfully", r.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	res, err := in.c.RemovePodSandbox(ctrdutil.WithNamespace(ctx), r)
 	return res, errdefs.ToGRPC(err)
@@ -301,6 +339,10 @@ func (in *instrumentedAlphaService) RemovePodSandbox(ctx context.Context, r *run
 	if err := in.checkInitialized(); err != nil {
 		return nil, err
 	}
+	ctx, span := tracing.StartSpan(ctx, makeSpanName("StopPodSandbox"),
+		tracing.SpanAttributes(attribute.String("sandbox.id", r.GetPodSandboxId())),
+	)
+	defer tracing.StopSpan(span)
 	log.G(ctx).Infof("RemovePodSandbox for %q", r.GetPodSandboxId())
 	defer func() {
 		if err != nil {
@@ -308,6 +350,7 @@ func (in *instrumentedAlphaService) RemovePodSandbox(ctx context.Context, r *run
 		} else {
 			log.G(ctx).Infof("RemovePodSandbox %q returns successfully", r.GetPodSandboxId())
 		}
+		tracing.SetSpanStatus(span, err)
 	}()
 	// converts request and response for earlier CRI version to call and get response from the current version
 	var v1r runtime.RemovePodSandboxRequest

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/tracing"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	sandboxstore "github.com/containerd/containerd/pkg/cri/store/sandbox"
@@ -31,20 +32,24 @@ import (
 // StopPodSandbox stops the sandbox. If there are any running containers in the
 // sandbox, they should be forcibly terminated.
 func (c *criService) StopPodSandbox(ctx context.Context, r *runtime.StopPodSandboxRequest) (*runtime.StopPodSandboxResponse, error) {
+	span := tracing.CurrentSpan(ctx)
+	span.AddEvent("call sandbox store to get sandbox")
 	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
 	if err != nil {
 		return nil, fmt.Errorf("an error occurred when try to find sandbox %q: %w",
 			r.GetPodSandboxId(), err)
 	}
+	span.AddEvent("found sandbox in sandbox store")
 
 	if err := c.stopPodSandbox(ctx, sandbox); err != nil {
 		return nil, err
 	}
-
 	return &runtime.StopPodSandboxResponse{}, nil
 }
 
 func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sandbox) error {
+	span := tracing.CurrentSpan(ctx)
+	span.AddEvent("stop pod sandbox")
 	// Use the full sandbox id.
 	id := sandbox.ID
 
@@ -72,6 +77,7 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 
 	// Teardown network for sandbox.
 	if sandbox.NetNS != nil {
+		span.AddEvent("start teardown pod network")
 		netStop := time.Now()
 		// Use empty netns path if netns is not available. This is defined in:
 		// https://github.com/containernetworking/cni/blob/v0.7.0-alpha1/SPEC.md
@@ -87,10 +93,11 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 			return fmt.Errorf("failed to remove network namespace for sandbox %q: %w", id, err)
 		}
 		sandboxDeleteNetwork.UpdateSince(netStop)
+		span.AddEvent("finish teardown pod network")
 	}
 
 	log.G(ctx).Infof("TearDown network for sandbox %q successfully", id)
-
+	span.AddEvent("pod sandbox stopped")
 	return nil
 }
 

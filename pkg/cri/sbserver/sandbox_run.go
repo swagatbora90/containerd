@@ -30,9 +30,11 @@ import (
 	eventtypes "github.com/containerd/containerd/api/events"
 	"github.com/containerd/containerd/protobuf"
 	sb "github.com/containerd/containerd/sandbox"
+	"github.com/containerd/containerd/tracing"
 	"github.com/containerd/go-cni"
 	"github.com/containerd/typeurl"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/containerd/log"
@@ -53,6 +55,7 @@ func init() {
 // RunPodSandbox creates and starts a pod-level sandbox. Runtimes should ensure
 // the sandbox is in ready state.
 func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandboxRequest) (_ *runtime.RunPodSandboxResponse, retErr error) {
+	span := tracing.CurrentSpan(ctx)
 	config := r.GetConfig()
 	log.G(ctx).Debugf("Sandbox config %+v", config)
 
@@ -63,6 +66,10 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, errors.New("sandbox config must include metadata")
 	}
 	name := makeSandboxName(metadata)
+	span.SetAttributes(
+		attribute.String("pod.sandbox.id", id),
+		attribute.String("pod.sandbox.name", name),
+	)
 	log.G(ctx).WithField("podsandboxid", id).Debugf("generated id for sandbox name %q", name)
 	// Reserve the sandbox name to avoid concurrent `RunPodSandbox` request starting the
 	// same sandbox.
@@ -115,6 +122,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}
 
 	if podNetwork {
+		span.AddEvent("setup pod network")
 		netStart := time.Now()
 		// If it is not in host network namespace then create a namespace and set the sandbox
 		// handle. NetNSPath in sandbox metadata and NetNS is non empty only for non host network
@@ -157,6 +165,9 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 			return nil, fmt.Errorf("failed to setup network for sandbox %q: %w", id, err)
 		}
 		sandboxCreateNetworkTimer.UpdateSince(netStart)
+		span.AddEvent("finished pod network setup",
+			tracing.SpanAttributes(attribute.String("pod.network.setup.duration", time.Since(netStart).String())),
+		)
 	}
 
 	// Save sandbox metadata to store
@@ -169,6 +180,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}
 
 	runtimeStart := time.Now()
+	span.AddEvent("Start sandbox container")
 
 	resp, err := c.sandboxController.Start(ctx, id)
 	if err != nil {
@@ -191,6 +203,12 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	}); err != nil {
 		return nil, fmt.Errorf("failed to update sandbox status: %w", err)
 	}
+	span.AddEvent("Successfully started sandbox container",
+		tracing.SpanAttributes(
+			attribute.Int("sandbox.status.pid", int(sandbox.Status.Get().Pid)),
+			attribute.String("sandbox.status.createdAt", sandbox.Status.Get().CreatedAt.Format(time.RFC3339)),
+			attribute.String("sandbox.status.state", sandbox.Status.Get().State.String()),
+		))
 
 	// TODO: get rid of this. sandbox object should no longer have Container field.
 	container, err := c.client.LoadContainer(ctx, id)
