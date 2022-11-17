@@ -24,6 +24,7 @@ import (
 
 	"github.com/containerd/log"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"github.com/containerd/containerd/v2/pkg/tracing"
 
 	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
 	"github.com/containerd/errdefs"
@@ -32,12 +33,13 @@ import (
 // StopPodSandbox stops the sandbox. If there are any running containers in the
 // sandbox, they should be forcibly terminated.
 func (c *criService) StopPodSandbox(ctx context.Context, r *runtime.StopPodSandboxRequest) (*runtime.StopPodSandboxResponse, error) {
+	span := tracing.SpanFromContext(ctx)
 	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
 	if err != nil {
 		return nil, fmt.Errorf("an error occurred when try to find sandbox %q: %w",
 			r.GetPodSandboxId(), err)
 	}
-
+	span.SetAttributes(tracing.Attribute("sandbox.id", sandbox.ID))
 	if err := c.stopPodSandbox(ctx, sandbox); err != nil {
 		return nil, err
 	}
@@ -46,12 +48,14 @@ func (c *criService) StopPodSandbox(ctx context.Context, r *runtime.StopPodSandb
 }
 
 func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sandbox) error {
+	span := tracing.SpanFromContext(ctx)
 	// Use the full sandbox id.
 	id := sandbox.ID
 
 	// Stop all containers inside the sandbox. This terminates the container forcibly,
 	// and container may still be created, so production should not rely on this behavior.
 	// TODO(random-liu): Introduce a state in sandbox to avoid future container creation.
+	span.AddEvent("stopping containers in the sandbox")
 	stop := time.Now()
 	containers := c.containerStore.List()
 	for _, container := range containers {
@@ -80,6 +84,10 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 
 	sandboxRuntimeStopTimer.WithValues(sandbox.RuntimeHandler).UpdateSince(stop)
 
+	span.AddEvent("sandbox container stopped",
+		tracing.Attribute("sandbox.stop.duration", time.Since(stop).String()),
+	)
+
 	err := c.nri.StopPodSandbox(ctx, &sandbox)
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("NRI sandbox stop notification failed")
@@ -87,6 +95,7 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 
 	// Teardown network for sandbox.
 	if sandbox.NetNS != nil {
+		span.AddEvent("start pod network teardown")
 		netStop := time.Now()
 		// Use empty netns path if netns is not available. This is defined in:
 		// https://github.com/containernetworking/cni/blob/v0.7.0-alpha1/SPEC.md
@@ -102,13 +111,70 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 			return fmt.Errorf("failed to remove network namespace for sandbox %q: %w", id, err)
 		}
 		sandboxDeleteNetwork.UpdateSince(netStop)
+
+		span.AddEvent("finished pod network teardown",
+			tracing.Attribute("network.teardown.duration", time.Since(netStop).String()),
+		)
 	}
 
 	log.G(ctx).Infof("TearDown network for sandbox %q successfully", id)
-
 	return nil
 }
 
+<<<<<<< HEAD:internal/cri/server/sandbox_stop.go
+=======
+// stopSandboxContainer kills the sandbox container.
+// `task.Delete` is not called here because it will be called when
+// the event monitor handles the `TaskExit` event.
+func (c *criService) stopSandboxContainer(ctx context.Context, sandbox sandboxstore.Sandbox) error {
+	id := sandbox.ID
+	container := sandbox.Container
+	state := sandbox.Status.Get().State
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		if !errdefs.IsNotFound(err) {
+			return fmt.Errorf("failed to get sandbox container: %w", err)
+		}
+		// Don't return for unknown state, some cleanup needs to be done.
+		if state == sandboxstore.StateUnknown {
+			return c.cleanupUnknownSandbox(ctx, id, sandbox)
+		}
+		return nil
+	}
+
+	// Handle unknown state.
+	// The cleanup logic is the same with container unknown state.
+	if state == sandboxstore.StateUnknown {
+		// Start an exit handler for containers in unknown state.
+		waitCtx, waitCancel := context.WithCancel(ctrdutil.NamespacedContext())
+		defer waitCancel()
+		exitCh, err := task.Wait(waitCtx)
+		if err != nil {
+			if !errdefs.IsNotFound(err) {
+				return fmt.Errorf("failed to wait for task: %w", err)
+			}
+			return c.cleanupUnknownSandbox(ctx, id, sandbox)
+		}
+
+		exitCtx, exitCancel := context.WithCancel(context.Background())
+		stopCh := c.eventMonitor.startSandboxExitMonitor(exitCtx, id, task.Pid(), exitCh)
+		defer func() {
+			exitCancel()
+			// This ensures that exit monitor is stopped before
+			// `Wait` is cancelled, so no exit event is generated
+			// because of the `Wait` cancellation.
+			<-stopCh
+		}()
+	}
+
+	// Kill the sandbox container.
+	if err = task.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("failed to kill sandbox container: %w", err)
+	}
+	return c.waitSandboxStop(ctx, sandbox)
+}
+
+>>>>>>> d2bb9f385 (Add spans to CRI runtime service and related client methods):pkg/cri/server/sandbox_stop.go
 // waitSandboxStop waits for sandbox to be stopped until context is cancelled or
 // the context deadline is exceeded.
 func (c *criService) waitSandboxStop(ctx context.Context, sandbox sandboxstore.Sandbox) error {
