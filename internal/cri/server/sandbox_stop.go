@@ -22,9 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/containerd/containerd/v2/pkg/tracing"
 	"github.com/containerd/log"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"github.com/containerd/containerd/v2/pkg/tracing"
 
 	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
 	"github.com/containerd/errdefs"
@@ -121,60 +121,6 @@ func (c *criService) stopPodSandbox(ctx context.Context, sandbox sandboxstore.Sa
 	return nil
 }
 
-<<<<<<< HEAD:internal/cri/server/sandbox_stop.go
-=======
-// stopSandboxContainer kills the sandbox container.
-// `task.Delete` is not called here because it will be called when
-// the event monitor handles the `TaskExit` event.
-func (c *criService) stopSandboxContainer(ctx context.Context, sandbox sandboxstore.Sandbox) error {
-	id := sandbox.ID
-	container := sandbox.Container
-	state := sandbox.Status.Get().State
-	task, err := container.Task(ctx, nil)
-	if err != nil {
-		if !errdefs.IsNotFound(err) {
-			return fmt.Errorf("failed to get sandbox container: %w", err)
-		}
-		// Don't return for unknown state, some cleanup needs to be done.
-		if state == sandboxstore.StateUnknown {
-			return c.cleanupUnknownSandbox(ctx, id, sandbox)
-		}
-		return nil
-	}
-
-	// Handle unknown state.
-	// The cleanup logic is the same with container unknown state.
-	if state == sandboxstore.StateUnknown {
-		// Start an exit handler for containers in unknown state.
-		waitCtx, waitCancel := context.WithCancel(ctrdutil.NamespacedContext())
-		defer waitCancel()
-		exitCh, err := task.Wait(waitCtx)
-		if err != nil {
-			if !errdefs.IsNotFound(err) {
-				return fmt.Errorf("failed to wait for task: %w", err)
-			}
-			return c.cleanupUnknownSandbox(ctx, id, sandbox)
-		}
-
-		exitCtx, exitCancel := context.WithCancel(context.Background())
-		stopCh := c.eventMonitor.startSandboxExitMonitor(exitCtx, id, task.Pid(), exitCh)
-		defer func() {
-			exitCancel()
-			// This ensures that exit monitor is stopped before
-			// `Wait` is cancelled, so no exit event is generated
-			// because of the `Wait` cancellation.
-			<-stopCh
-		}()
-	}
-
-	// Kill the sandbox container.
-	if err = task.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
-		return fmt.Errorf("failed to kill sandbox container: %w", err)
-	}
-	return c.waitSandboxStop(ctx, sandbox)
-}
-
->>>>>>> d2bb9f385 (Add spans to CRI runtime service and related client methods):pkg/cri/server/sandbox_stop.go
 // waitSandboxStop waits for sandbox to be stopped until context is cancelled or
 // the context deadline is exceeded.
 func (c *criService) waitSandboxStop(ctx context.Context, sandbox sandboxstore.Sandbox) error {

@@ -398,15 +398,6 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		return nil, fmt.Errorf("failed to update sandbox status: %w", err)
 	}
 
-<<<<<<< HEAD:internal/cri/server/sandbox_run.go
-	// Add sandbox into sandbox store in INIT state.
-=======
-	span.AddEvent("Successfully started sandbox container",
-		tracing.Attribute("sandbox.status.pid", int(task.Pid())),
-		tracing.Attribute("sandbox.status.createdAt", info.CreatedAt.Format(time.RFC3339)),
-	)
-
->>>>>>> d2bb9f385 (Add spans to CRI runtime service and related client methods):pkg/cri/server/sandbox_run.go
 	if err := c.sandboxStore.Add(sandbox); err != nil {
 		return nil, fmt.Errorf("failed to add sandbox %+v into store: %w", sandbox, err)
 	}

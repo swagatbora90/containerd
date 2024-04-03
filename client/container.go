@@ -202,6 +202,8 @@ func (c *container) Delete(ctx context.Context, opts ...DeleteOpts) error {
 }
 
 func (c *container) Task(ctx context.Context, attach cio.Attach) (Task, error) {
+	ctx, span := tracing.StartSpan(ctx, "container.Task")
+	defer span.End()
 	return c.loadTask(ctx, attach)
 }
 
