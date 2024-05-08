@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/v2/pkg/userns"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
@@ -95,6 +96,7 @@ func (m *Mount) mount(target string) (err error) {
 		usernsFd  *os.File
 		options   = m.Options
 	)
+
 	opt := parseMountOptions(options)
 	// The only remapping of both GID and UID is supported
 	if opt.uidmap != "" && opt.gidmap != "" {
@@ -184,10 +186,21 @@ func (m *Mount) mount(target string) (err error) {
 		}
 	}
 
+	// If we are using user namespaces, then we must make sure that we
+	// don't drop any of the CL_UNPRIVILEGED "locked" flags of the
+	// bind mount target when we remount.
+	var unprivFlags int
+	if userns.RunningInUserNS() {
+		unprivFlags, err = getUnprivilegedMountFlags(target)
+		if err != nil {
+			return err
+		}
+	}
+
 	const broflags = unix.MS_BIND | unix.MS_RDONLY
 	if oflags&broflags == broflags {
 		// Remount the bind to apply read only.
-		return unix.Mount("", target, "", uintptr(oflags|unix.MS_REMOUNT), "")
+		return unix.Mount("", target, "", uintptr(oflags|unprivFlags|unix.MS_REMOUNT), "")
 	}
 
 	// remap non-overlay mount point
@@ -197,6 +210,40 @@ func (m *Mount) mount(target string) (err error) {
 		}
 	}
 	return nil
+}
+
+// Get the set of mount flags that are set on the mount that contains the given
+// path and are locked by CL_UNPRIVILEGED. This is necessary to ensure that
+// bind-mounting "with options" will not fail with user namespaces, due to
+// kernel restrictions that require user namespace mounts to preserve
+// CL_UNPRIVILEGED locked flags.
+//
+// From https://github.com/moby/moby/blob/v23.0.1/daemon/oci_linux.go#L430-L460
+func getUnprivilegedMountFlags(path string) (int, error) {
+	var statfs unix.Statfs_t
+	if err := unix.Statfs(path, &statfs); err != nil {
+		return 0, err
+	}
+
+	// The set of keys come from https://github.com/torvalds/linux/blob/v4.13/fs/namespace.c#L1034-L1048.
+	unprivilegedFlags := []int{
+		unix.MS_RDONLY,
+		unix.MS_NODEV,
+		unix.MS_NOEXEC,
+		unix.MS_NOSUID,
+		unix.MS_NOATIME,
+		unix.MS_RELATIME,
+		unix.MS_NODIRATIME,
+	}
+
+	var flags int
+	for flag := range unprivilegedFlags {
+		if statfs.Flags&int64(flag) == int64(flag) {
+			flags |= flag
+		}
+	}
+
+	return flags, nil
 }
 
 func doPrepareIDMappedOverlay(lowerDirs []string, usernsFd int) (tmpLowerDirs []string, _ func(), _ error) {
