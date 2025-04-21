@@ -385,3 +385,120 @@ func TestHostAccessingSandbox(t *testing.T) {
 		})
 	}
 }
+
+func TestFallbackToLocalImagePull(t *testing.T) {
+	testCases := []struct {
+		name            string
+		imageConfig     *ImageConfig
+		expectLocalPull bool
+	}{
+		{
+			name: "already using local pull",
+			imageConfig: &ImageConfig{
+				UseLocalImagePull: true,
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "no conflicting configs",
+			imageConfig: &ImageConfig{
+				Snapshotter:              "overlayfs",
+				ImagePullProgressTimeout: "5m",
+				StatsCollectPeriod:       10,
+			},
+			expectLocalPull: false,
+		},
+		{
+			name: "DisableSnapshotAnnotations triggers local pull",
+			imageConfig: &ImageConfig{
+				DisableSnapshotAnnotations: true,
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "DiscardUnpackedLayers triggers local pull",
+			imageConfig: &ImageConfig{
+				DiscardUnpackedLayers: true,
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "Registry.Mirrors triggers local pull",
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Mirrors: map[string]Mirror{
+						"docker.io": {
+							Endpoints: []string{"https://mirror.example.com"},
+						},
+					},
+				},
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "Registry.Configs triggers local pull",
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Configs: map[string]RegistryConfig{
+						"docker.io": {
+							Auth: &AuthConfig{
+								Username: "user",
+								Password: "pass",
+							},
+						},
+					},
+				},
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "Registry.Auths triggers local pull",
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					Auths: map[string]AuthConfig{
+						"https://docker.io": {
+							Username: "user",
+							Password: "pass",
+						},
+					},
+				},
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "MaxConcurrentDownloads triggers local pull",
+			imageConfig: &ImageConfig{
+				MaxConcurrentDownloads: 5,
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "ImagePullWithSyncFs triggers local pull",
+			imageConfig: &ImageConfig{
+				ImagePullWithSyncFs: true,
+			},
+			expectLocalPull: true,
+		},
+		{
+			name: "Registry.ConfigPath and Headers don't trigger local pull",
+			imageConfig: &ImageConfig{
+				Registry: Registry{
+					ConfigPath: "/etc/containerd/certs.d",
+					ConfigPath: "/etc/containerd/certs.d",
+					Headers: map[string][]string{
+						"User-Agent": {"containerd/1.6"},
+					},
+				},
+			},
+			expectLocalPull: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fallbackToLocalImagePull(ctx, tc.imageConfig)
+			assert.Equal(t, tc.expectLocalPull, tc.imageConfig.UseLocalImagePull)
+		})
+	}
+}

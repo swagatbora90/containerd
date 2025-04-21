@@ -178,9 +178,6 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 
 	// If UseLocalImagePull is true, use client.Pull to pull the image, else use transfer service by default.
 	//
-	// Transfer service does not currently support remote snapshotters.
-	// TODO: Add support for remote snapshotters in Transfer Service. This is currently being tracked in containerd/containerd#9931
-	//
 	// Transfer service does not currently support all the CRI image config options.
 	// TODO: Add support for DisableSnapshotAnnotations, DiscardUnpackedLayers, ImagePullWithSyncFs and unpackDuplicationSuppressor
 	var image containerd.Image
@@ -309,6 +306,8 @@ func (c *CRIImageService) pullImageWithTransferService(
 	log.G(ctx).Debugf("Getting new CRI credentials")
 	ch := newCRICredentials(ref, credentials)
 	opts := []registry.Opt{registry.WithCredentials(ch)}
+	opts = append(opts, registry.WithHeaders(c.config.Registry.Headers))
+	opts = append(opts, registry.WithHostDir(c.config.Registry.ConfigPath))
 	reg, err := registry.NewOCIRegistry(ctx, ref, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create OCI registry: %w", err)

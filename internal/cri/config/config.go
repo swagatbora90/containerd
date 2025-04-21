@@ -475,14 +475,6 @@ const (
 	KeyModelNode = "node"
 )
 
-// transferServiceConfigMigration represents a CRI ImageConfig option that will be No-op once
-// transfer service is used for image pull in CRI.
-type transferServiceConfigMigration struct {
-	ConfigName    string
-	CheckValue    func(*ImageConfig) bool
-	NewConfigPath string
-}
-
 // ValidateImageConfig validates the given image configuration
 func ValidateImageConfig(ctx context.Context, c *ImageConfig) ([]deprecation.Warning, error) {
 	var warnings []deprecation.Warning
@@ -530,29 +522,79 @@ func ValidateImageConfig(ctx context.Context, c *ImageConfig) ([]deprecation.War
 		}
 	}
 
-	// Add warnings for config values which are no-op when using transfer service for image pull.
-	transferServiceConfigs := []transferServiceConfigMigration{
-		{
-			ConfigName:    "max_concurrent_downloads",
-			CheckValue:    func(c *ImageConfig) bool { return c.MaxConcurrentDownloads > 0 },
-			NewConfigPath: `plugins."io.containerd.transfer.v1.local"`,
-		},
-	}
-	// Check all configurations that have changed when transfer service is enabled
-	// Add a warning if a configuration is still defined in the CRI config.
-	if !c.UseLocalImagePull {
-		for _, config := range transferServiceConfigs {
-			if config.CheckValue(c) {
-				log.G(ctx).Warnf(
-					"'%s' should be configured under [%s] when using transfer service",
-					config.ConfigName,
-					config.NewConfigPath,
-				)
-			}
-		}
-	}
+	// Check for image configuration conflicts when transfer service is enabled
+	// and handle fallback to local image pull if needed.
+	fallbackToLocalImagePull(ctx, c)
 
 	return warnings, nil
+}
+
+// fallbackToLocalImagePull checks if there are CRI Image Config options configured that are not supported
+// with trasnfer service and sets UseLocalImagePull to true. This ensures compatibility with configurations
+// that aren't supported or need to be configured differently when using transfer service.
+func fallbackToLocalImagePull(ctx context.Context, c *ImageConfig) {
+	// If already using local image pull, no need to check for conflicts
+	if c.UseLocalImagePull {
+		return
+	}
+
+	// List of Config options that automatically trigger fallback to local image pull
+	localPullOnlyConfigs := []struct {
+		Name      string
+		IsPresent func() bool
+		Reason    string
+	}{
+		{
+			Name:      "DisableSnapshotAnnotations",
+			IsPresent: func() bool { return c.DisableSnapshotAnnotations },
+			Reason:    "moved to snapshotter plugin when using trasnfer service",
+		},
+		{
+			Name:      "DiscardUnpackedLayers",
+			IsPresent: func() bool { return c.DiscardUnpackedLayers },
+			Reason:    "not supported with transfer service",
+		},
+		{
+			Name:      "Registry.Mirrors",
+			IsPresent: func() bool { return len(c.Registry.Mirrors) > 0 },
+			Reason:    "not supported with transfer service (also deprecated)",
+		},
+		{
+			Name:      "Registry.Configs",
+			IsPresent: func() bool { return len(c.Registry.Configs) > 0 },
+			Reason:    "not supported with transfer service (also deprecated)",
+		},
+		{
+			Name:      "Registry.Auths",
+			IsPresent: func() bool { return len(c.Registry.Auths) > 0 },
+			Reason:    "not supported with transfer service (also deprecated)",
+		},
+		{
+			Name:      "MaxConcurrentDownloads",
+			IsPresent: func() bool { return c.MaxConcurrentDownloads > 0 },
+			Reason:    "must be configured in transfer service plugin: plugins.\"io.containerd.transfer.v1.local\"",
+		},
+		{
+			Name:      "ImagePullWithSyncFs",
+			IsPresent: func() bool { return c.ImagePullWithSyncFs },
+			Reason:    "not supported with transfer service",
+		},
+	}
+
+	for _, config := range localPullOnlyConfigs {
+		if config.IsPresent() {
+			// Fall back to local image pull
+			c.UseLocalImagePull = true
+			log.G(ctx).Warnf(
+				"Found '%s' in CRI config which is incompatible with transfer service (%s). "+
+					"Falling back to local image pull mode.",
+				config.Name,
+				config.Reason,
+			)
+			// Break after first conflict is found
+			break
+		}
+	}
 }
 
 // ValidateRuntimeConfig validates the given runtime configuration.
